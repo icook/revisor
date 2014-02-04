@@ -3,156 +3,143 @@ import gzip
 import json
 import hashlib
 import StringIO
+import msgpack
+
+dmp = diff_match_patch()
+
+
+""" Patch the diff_match_patch to include simple serialization and
+deserialization of patch objects. """
+def serialize(self):
+    # since the diffs return encoded strings, we need to decode them
+    # since this function re-encodes them
+    diffs = [(op, data.decode('utf-8')) for op, data in self.diffs]
+    return msgpack.packb([dmp.diff_toDelta(diffs),
+                          self.length1,
+                          self.length2,
+                          self.start1,
+                          self.start2])
+patch_obj.serialize = serialize
+
+
+@classmethod
+def deserialize(cls, string, original_text):
+    inst = cls()
+    parts = msgpack.unpackb(string, encoding='utf-8')
+    inst.length1 = int(parts[1])
+    inst.length2 = int(parts[2])
+    inst.start1 = int(parts[3])
+    inst.start2 = int(parts[4])
+    print parts
+    print "'" + original_text[inst.start1:inst.length1 + inst.start1] + "'"
+    print len(original_text[inst.start1:inst.length1 + inst.start1])
+    inst.diffs = dmp.diff_fromDelta(
+        original_text[inst.start1:inst.length1 + inst.start1],
+        parts[0])
+    return inst
+patch_obj.deserialize = deserialize
 
 
 class Revision(object):
-    __slots__ = ['_diffs',
-                 '_diff_dicts',
+    __slots__ = ['_serial_patches',
+                 'patches',
                  '_json',
                  '_hash']
 
-    def __init__(self, diffs=None):
-        if diffs:
-            self._diffs = diffs
-        else:
-            self._diffs = []
-        self._json = None
+    def __init__(self):
         self._hash = None
-        self._diff_dicts = None
+        self._serial_patches = None
+        self.patches = None
+        self._json = None
 
-    def gzip(self):
-        """ Gzips the json structure of a revision """
-        s = StringIO.StringIO()
-        f = gzip.GzipFile(fileobj=s, mode='w')
-        f.write(self.json)
-        f.close()
-        return s.getvalue()
-
-    @classmethod
-    def from_gzip(cls, gzip_string):
-        """ Generates a revision from gzip method above """
-        stream = StringIO.StringIO(gzip_string)
-        fo = gzip.GzipFile(fileobj=stream, mode='r')
-        inst = cls.from_dict(json.load(fo))
-        fo.close()
-        return inst
-
-    @property
-    def diff_dicts(self):
-        """ Lazy Loaded list of dictionary representations of internal diffs
-        """
-        if self._diff_dicts is None:
-            self._diff_dicts = []
-            for d in self._diffs:
-                dct = dict(d=d.diffs,
-                           s1=d.start1,
-                           s2=d.start2,
-                           l1=d.length1,
-                           l2=d.length2)
-                self._diff_dicts.append(dct)
-        return self._diff_dicts
-
-    @property
-    def json(self):
-        """ Lazily dumps the json of the revision's data stored as a dictionary
-        """
-        if self._json is None:
-            self._json = json.dumps(self.dict)
-        return self._json
-
-    @property
-    def dict(self):
-        """ Serializes all the unique attributes into a dictionary """
-        return dict(d=self.diff_dicts,
-                    h=self.hash())
+    # Lazy loaders
+    # ========================================================================
+    def serial_patches(self):
+        if self._serial_patches is None:
+            self._serial_patches = [p.serialize() for p in self.patches]
+        return self._serial_patches
 
     def hash(self, recalc=False):
-        """ Lazy calculated hash of the internal diffs. Recalc will force
-        a recheck even if already populated and Assert hash match"""
         if self._hash is None or recalc is True:
-            hsh = hashlib.sha256(json.dumps(self.diff_dicts)).hexdigest()
+            hsh = hashlib.sha256(''.join(self.serial_patches())).hexdigest()
             self._hash = hsh
             if recalc:
                 # check matching hash
                 assert hsh == self._hash
         return self._hash
 
+    # Creation and Export methods / Classmethods
+    # ========================================================================
     @classmethod
-    def from_dict(cls, dct):
-        """ Creates an instance of revision from a dictionary serialization """
+    def from_tuple(cls, tpl, original_text):
+        """ Creates an instance of revision from a serialization and the source
+        text """
         inst = cls()
-        for item in dct['d']:
-            p = patch_obj()
-            p.diffs = item['d']
-            p.start1 = item['s1']
-            p.start2 = item['s2']
-            p.length1 = item['l1']
-            p.length2 = item['l2']
-            inst._diffs.append(p)
-        inst._hash = dct['h']
+        inst._serial_patches = tpl[0]
+        inst.patches = [patch_obj.deserialize(p, original_text)
+                        for p in inst._serial_patches]
+        inst._hash = tpl[1]
+        return inst
+
+    def to_tuple(self):
+        """ Creates an instance of revision from a dictionary serialization """
+        return self.serial_patches(), self.hash()
+
+    @classmethod
+    def from_patches(cls, patches):
+        """ Utility method allowing you to create a revision from
+        diff_match_patch diff objects """
+        inst = cls()
+        inst.patches = patches
         return inst
 
     @classmethod
     def from_text(cls, text, text_old=""):
         """ A simple wrapper for the diff-patch-match method """
-        return cls(diff_match_patch().patch_make(text_old, b=text))
+        if isinstance(text, unicode):
+            text = text.encode('unicode-escape')
+        if isinstance(text_old, unicode):
+            text_old = text_old.encode('unicode-escape')
+        return cls.from_patches(dmp.patch_make(text_old, b=text))
 
+    # Application methods
+    # ========================================================================
     def apply(self, text):
-        return diff_match_patch().patch_apply(self._diffs, text)
+        return dmp.patch_apply(self.patches, text)
 
 
 class RevisionHistory(object):
-    __slots__ = ['_revisions']
+    __slots__ = ['revisions']
 
     def __init__(self):
-        self._revisions = []
+        self.revisions = []
 
-    def gzip(self):
-        s = StringIO.StringIO()
-        f = gzip.GzipFile(fileobj=s, mode='w')
-        # write opening json structure
-        f.write('[')
-        first = True
-        for rev in self._revisions:
-            if first:
-                first = False
-            else:
-                f.write(',')
-            f.write(rev.json)
-        f.write(']')
-        f.close()
-        return s.getvalue()
-
-    def add_revision(self, rev):
-        try:
-            next_rev = self._revisions[-1].rev + 1
-        except IndexError:
-            next_rev = 0
-        rev.rev = next_rev
-        self._revisions.append(rev)
-
-    def rebuild(self):
+    def rebuild(self, hash=None):
         """ Reconstructs a document based on revision history """
         patch_list = []
-        for rev in self._revisions:
-            patch_list += rev._diffs
-        return diff_match_patch().patch_apply(patch_list, "")[0]
-
-    def check_rebuild(self, string):
-        """ Rebuilds the history and checks it against a string """
-        return self.rebuild() == string
-
-    def check(self):
-        for rev in self._revisions:
-            rev.hash(recalc=True)
+        for rev in self.revisions:
+            patch_list += rev.patches
+            if hash is not None and rev.hash == hash:
+                break
+        else:
+            if hash is not None:
+                return False
+        return dmp.patch_apply(patch_list, "")[0]
 
     @classmethod
-    def from_gzip(cls, gzip_string):
-        """ Generates a revision history from gzip method above """
-        inst = cls()
-        stream = StringIO.StringIO(gzip_string)
-        fo = gzip.GzipFile(fileobj=stream, mode='r')
-        for rec_dct in json.load(fo):
-            inst._revisions.append(Revision.from_dict(rec_dct))
-        fo.close()
-        return inst
+    def rebuild_from_tuple_lst(self, iterator, hash=None):
+        text = ""
+        for tpl in iterator:
+            rev = Revision.from_tuple(tpl, text)
+            if hash is not None and rev.hash == hash:
+                break
+            text = dmp.patch_apply(rev.patches, text)[0]
+        else:
+            if hash is not None:
+                return False
+        return text
+
+    def check(self):
+        """ Verifies hash integrity """
+        for rev in self.revisions:
+            rev.hash(recalc=True)

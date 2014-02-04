@@ -2,7 +2,7 @@
 
 from setuptools import setup, find_packages
 
-requires = ['diff-match-patch']
+requires = ['diff-match-patch', 'msgpack']
 
 setup(name='revisor',
       version='0.1',

@@ -16,6 +16,7 @@ Bundle 'tpope/vim-markdown'
 Bundle 'kchmck/vim-coffee-script'
 " Color schemes
 Bundle 'vim-scripts/peaksea'
+日本語
 
 " Lots and lots of general setup
 """"""""""""""""""""""""""""""""""""""
@@ -130,6 +131,7 @@ set ffs=unix,dos,mac
 
 colorscheme peaksea
 
+日本語 日本語 日本語 日本語
 " Moving around
 """""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
 " Treat long lines as break lines (useful when moving around in them)
@@ -206,6 +208,7 @@ map <leader>p :set paste!<CR>
 map <F5> :so $MYVIMRC<CR>
 map <F6> :e $MYVIMRC<CR>
 
+日本語
 " Remap VIM 0 to first non-blank character
 map 0 ^
 imap <S-Space> <Esc>
